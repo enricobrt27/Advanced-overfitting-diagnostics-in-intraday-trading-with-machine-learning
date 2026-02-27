@@ -6,9 +6,6 @@ from typing import Optional, Tuple
 from datetime import datetime
 from pathlib import Path
 from data_cleaning import drop_duplicate_timestamps, detect_missing_periods, detect_invalid_blocks, ensure_datetime_utc
-from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import StandardScaler
-from sklearn.pipeline import Pipeline
 from sklearn.metrics import roc_auc_score, log_loss
 
 TZ = "UTC"                           #assume/convert to UTC
@@ -300,7 +297,6 @@ def validate_pipeline_diagnostics(
     t_end_col: str = "t_end",
     side_col: str = "side",
     side_score_col: str = "side_score",
-    meta_y_col: str = "meta_y",
     horizon_bars: int | None = None,
     bar_minutes: int = 1,
     pair_name: str | None = None,
@@ -323,51 +319,6 @@ def validate_pipeline_diagnostics(
     This is diagnostic only; it does not modify inputs.
     """
     
-    from sklearn.metrics import roc_auc_score, log_loss
-
-    def secondary_diagnostics(
-        df_events: pd.DataFrame,
-        proba_col: str = "p_meta",
-        target_col: str = "meta_y",
-        weight_col: str = "weight",
-        n_bins: int = 10,
-        tag: str = "",
-    ):
-        tmp = df_events.copy()
-        tmp = tmp[np.isfinite(tmp[target_col]) & np.isfinite(tmp[proba_col])].copy()
-        if tmp.empty:
-            print(f"[SECONDARY] No valid rows for diagnostics{tag}")
-            return
-    
-        y = tmp[target_col].astype(int).values
-        p = tmp[proba_col].astype(float).values
-        w = tmp[weight_col].astype(float).values if weight_col in tmp.columns else None
-    
-        auc = roc_auc_score(y, p, sample_weight=w)
-        ll = log_loss(y, p, sample_weight=w, labels=[0, 1])
-        print(f"\n[SECONDARY DIAGNOSTICS]{tag}")
-        print(f"AUC: {auc:.4f} | LogLoss: {ll:.4f} | N: {len(tmp)}")
-    
-        # Calibration table by decile (or quantile bins)
-        bins = pd.qcut(tmp[proba_col], q=min(n_bins, tmp[proba_col].nunique()), duplicates="drop")
-        grp = tmp.groupby(bins, observed=False).agg(
-            p_mean=(proba_col, "mean"),
-            y_rate=(target_col, "mean"),
-            n=(target_col, "size"),
-        )
-        grp["y_rate"] *= 100
-        grp["p_mean"] *= 100
-        print("\nCalibration by proba bin (%):")
-        print(grp)
-    
-        # Simple “trade filter” sanity: accept top X% probabilities
-        for q in [0.50, 0.70, 0.80, 0.90]:
-            thr = tmp[proba_col].quantile(q)
-            sel = tmp[tmp[proba_col] >= thr]
-            rate = 100 * sel[target_col].mean()
-            cover = 100 * (len(sel) / len(tmp))
-            print(f"Top {(1-q)*100:.0f}% probs: coverage={cover:.1f}% | meta_y=1 rate={rate:.1f}% | thr={thr:.3f}")
-
     
     def _print_hdr(title: str):
         line = "=" * len(title)
@@ -594,65 +545,6 @@ def validate_pipeline_diagnostics(
     else:
         print(f" df_sess missing '{side_score_col}' column.")
 
-    # Meta-label diagnostics
-    _print_hdr(f" META-LABEL DIAGNOSTICS{tag}")
-
-    # meta_y balance
-    if meta_y_col in x.columns:
-        my = x[meta_y_col].reindex(tb_local.index)
-        myv = my.dropna().astype(float)
-        if myv.empty:
-            print(" meta_y is all NaN at events.")
-        else:
-            p1 = float((myv == 1).mean() * 100)
-            p0 = float((myv == 0).mean() * 100)
-            print(f"meta_y class balance (non-NaN): 1={p1:.1f}%, 0={p0:.1f}%")
-    else:
-        # allow meta_y passed only as tb column
-        if meta_y_col in tb_local.columns:
-            myv = tb_local[meta_y_col].dropna().astype(float)
-            p1 = float((myv == 1).mean() * 100) if not myv.empty else np.nan
-            p0 = float((myv == 0).mean() * 100) if not myv.empty else np.nan
-            print(f"meta_y class balance (from tb): 1={p1:.1f}%, 0={p0:.1f}%")
-        else:
-            print(f"meta_y not found in df_sess or tb as '{meta_y_col}'.")
-
-    # Relationship meta_y vs |side_score|
-    _print_hdr(f"meta_y vs |side_score|{tag}")
-    if (side_score_col in x.columns):
-        ss = x[side_score_col].reindex(tb_local.index).astype(float)
-        # meta_y from df_sess if present, else tb
-        if meta_y_col in x.columns:
-            my = x[meta_y_col].reindex(tb_local.index)
-        elif meta_y_col in tb_local.columns:
-            my = tb_local[meta_y_col]
-        else:
-            my = None
-
-        if my is None:
-            print(" Cannot compute meta_y vs |side_score|: meta_y missing.")
-        else:
-            tmp = pd.concat([my.rename("meta_y"), ss.abs().rename("|side_score|")], axis=1).dropna()
-            if len(tmp) < 30:
-                print("Not enough labeled data for meta_y vs |side_score| check.")
-            else:
-                # Bin by |side_score|
-                tmp["bin"] = pd.qcut(tmp["|side_score|"], q=5, duplicates="drop")
-                grp = tmp.groupby("bin")["meta_y"].mean() * 100
-                print("P(meta_y=1) by |side_score| quintile (in %):")
-                print(grp.round(1).to_string())
-    else:
-        print(f"df_sess missing '{side_score_col}' column.")
-        
-    # SECONDARY MODEL DIAGNOSTICS (if available)
-    if "p_meta" in df_sess.columns:
-        secondary_diagnostics(
-            df_events=df_sess.loc[events],   # SOLO righe evento
-            proba_col="p_meta",
-            target_col="meta_y",
-            weight_col="weight",
-            tag=f" [{pair_name}]",
-        )
 
 
     _print_hdr(f"DONE{tag}")
@@ -1106,114 +998,6 @@ def primary_side_mean_reversion(
     return out
 
 
-def fit_secondary_logistic(
-    df_events: pd.DataFrame,
-    feature_cols: list[str],
-    target_col: str = "meta_y",
-    weight_col: str = "weight",
-    splits: list[tuple[np.ndarray, np.ndarray]] | None = None,
-    C: float = 1.0,
-    max_iter: int = 200,
-    proba_col: str = "p_meta",
-) -> tuple[pd.Series, dict]:
-    """
-    Secondary model (meta-labeling): logistic regression predicting P(meta_y=1).
-
-    - df_events: DataFrame indexed for t0 (DatetimeIndex) or with timestamp column already filtered by event.
-    - feature_cols: columns of features to use (numeric).
-    - splits: list of (train_idx, test_idx) already purged/embargo.
-              If None: Fit in-sample and return proba in-sample (only diagnostics).
-    - Return:
-        * p_hat: Series with out-of-sample probability (if splits) otherwise in-sample
-        * report: aggregate metrics (AUC, logloss, coverage, ecc.)
-    """
-
-    # target and feature matrix
-    df = df_events.copy()
-
-    # keep only the rows with a valid target
-    df = df[np.isfinite(df[target_col])].copy()
-    y = df[target_col].astype(int).values
-
-    X = df[feature_cols].replace([np.inf, -np.inf], np.nan)
-    X = X.astype(float)
-    # drop rows with NaN in the features
-    good = X.notna().all(axis=1)
-    df = df.loc[good].copy()
-    X = X.loc[good].values
-    y = df[target_col].astype(int).values
-
-    if weight_col in df.columns:
-        w = df[weight_col].astype(float).values
-        # fallback if there are NaNs
-        w = np.where(np.isfinite(w), w, 1.0)
-    else:
-        w = np.ones(len(df), dtype=float)
-
-    # model: scaler + logistic (L2)
-    model = Pipeline(steps=[
-        ("scaler", StandardScaler(with_mean=True, with_std=True)),
-        ("clf", LogisticRegression(
-            C=C,
-            penalty="l2",
-            solver="lbfgs",
-            max_iter=max_iter,
-            class_weight=None,     
-        )),
-    ])
-
-    # Forecasts
-    p_hat = pd.Series(index=df.index, dtype=float, name=proba_col)
-
-    fold_metrics = []
-    if splits is None:
-        # in-sample fit (only for sanity check, not for performance claims)
-        model.fit(X, y, clf__sample_weight=w)
-        p = model.predict_proba(X)[:, 1]
-        p_hat.loc[df.index] = p
-
-        auc = roc_auc_score(y, p, sample_weight=w)
-        ll = log_loss(y, p, sample_weight=w, labels=[0, 1])
-        fold_metrics.append({"auc": auc, "logloss": ll, "n": len(y)})
-
-    else:
-        # out-of-sample by fold
-        for k, (train_idx, test_idx) in enumerate(splits, start=1):
-            train_t0 = df.index.intersection(train_idx)
-            test_t0  = df.index.intersection(test_idx)
-
-            if len(train_t0) == 0 or len(test_t0) == 0:
-                continue
-
-            X_train = df.loc[train_t0, feature_cols].values
-            y_train = df.loc[train_t0, target_col].astype(int).values
-            w_train = df.loc[train_t0, weight_col].astype(float).values if weight_col in df.columns else None
-
-            X_test  = df.loc[test_t0, feature_cols].values
-            y_test  = df.loc[test_t0, target_col].astype(int).values
-            w_test  = df.loc[test_t0, weight_col].astype(float).values if weight_col in df.columns else None
-
-            model.fit(X_train, y_train, clf__sample_weight=w_train)
-            p = model.predict_proba(X_test)[:, 1]
-            p_hat.loc[test_t0] = p
-
-            auc = roc_auc_score(y_test, p, sample_weight=w_test)
-            ll = log_loss(y_test, p, sample_weight=w_test, labels=[0, 1])
-            fold_metrics.append({"fold": k, "auc": auc, "logloss": ll, "n": len(y_test)})
-
-    # report 
-    rep = {}
-    if fold_metrics:
-        aucs = [m["auc"] for m in fold_metrics]
-        lls  = [m["logloss"] for m in fold_metrics]
-        ns   = [m["n"] for m in fold_metrics]
-        rep["auc_mean"] = float(np.average(aucs, weights=ns))
-        rep["logloss_mean"] = float(np.average(lls, weights=ns))
-        rep["n_scored"] = int(np.isfinite(p_hat).sum())
-        rep["n_total"] = int(len(p_hat))
-
-    return p_hat, rep
-
 
 
 def compute_sample_weights(
@@ -1304,7 +1088,6 @@ def compute_sample_weights(
     return pd.Series(w, index=t0)
 
 
-
 def feature_folder(
     joined: str,
     labeled: str,
@@ -1313,14 +1096,15 @@ def feature_folder(
     cusum_min_spacing: str | None = "2min",
     horizon: int | None = None):
 
-    #Build event-driven feature sets:
-    #  - Input:  *_BIDASK_JOINED.parquet  (joined, cleaned BID/ASK OHLC)
-    #  - Output: *_LABELED.parquet       (one row per event t0 with features + TBM labels)
+    """
+    Build event-driven feature sets:
+      - Input:  *_BIDASK_JOINED.parquet  (joined, cleaned BID/ASK OHLC)
+      - Output: *_LABELED.parquet       (one row per event t0 with features + TBM labels)
 
-    #Notes:
-    #Features are computed on the full time series, then sliced at event times (t0).
-    #CUSUM defines event timestamps only; TBM assigns {-1,0,+1} labels at those t0.
-    
+    Notes:
+    Features are computed on the full time series, then sliced at event times (t0).
+    CUSUM defines event timestamps only; TBM assigns {-1,0,+1} labels at those t0.
+    """
 
     os.makedirs(labeled, exist_ok=True)
     files = glob.glob(os.path.join(joined, "*_BIDASK_JOINED.parquet"))
@@ -1384,7 +1168,12 @@ def feature_folder(
         if rets_el.empty or sigma_el.empty:
             print("⚠️ No eligible timestamps (session+runway). Saving basic features only.")
             df_tmp = df.loc[session_mask_utc(df.index, 8, 18)].reset_index()
-            side_df = primary_side_fn(df_tmp, time_col=tb_params.time_col)
+            side_df = primary_side_mean_reversion(
+                df_tmp,
+                time_col=tb_params.time_col,
+                lookback=15,
+                z_floor=0.5,
+            )
             df_tmp = df_tmp.merge(side_df.reset_index(), on=tb_params.time_col, how="left")
             out_path = os.path.join(
                 labeled, base.replace("_BIDASK_JOINED.parquet", "_LABELED.parquet")
@@ -1404,7 +1193,12 @@ def feature_folder(
         if len(events) == 0:
             print("⚠️ No CUSUM events found (eligible domain); saving basic features only.")
             df_tmp = df.loc[session_mask_utc(df.index, 8, 18)].reset_index()
-            side_df = primary_side_fn(df_tmp, time_col=tb_params.time_col)
+            side_df = primary_side_mean_reversion(
+                df_tmp,
+                time_col=tb_params.time_col,
+                lookback=15,
+                z_floor=0.5,
+            )
             df_tmp = df_tmp.merge(side_df.reset_index(), on=tb_params.time_col, how="left")
             out_path = os.path.join(
                 labeled, base.replace("_BIDASK_JOINED.parquet", "_LABELED.parquet")
@@ -1445,20 +1239,9 @@ def feature_folder(
             print("⚠️ No TB labels generated.")
             continue
         
-        # Side only on events
-        side_on_events = df_sess["side"].reindex(tb.index)
-        
-        # Meta-label: 1 if correct side and label != 0, 0 otherwise; NaN if side is NaN
-        meta_y = np.where(
-            side_on_events.notna(),
-            ((side_on_events * tb["label"]) == 1).astype(int),
-            np.nan,
-        )
-        
         df_sess.loc[tb.index, "t1_vert"] = tb["t1_vert"].values
         df_sess.loc[tb.index, "t_end"]   = tb["t_end"].values
         df_sess.loc[tb.index, "label"]   = tb["label"].astype(float).values
-        df_sess.loc[tb.index, "meta_y"]  = meta_y
         
         # Sample weights: t_end as interval end
         rets = df_sess["ret_1"].astype(float)
@@ -1469,28 +1252,6 @@ def feature_folder(
         
         # Save only event rows (t0) 
         df_out = df_sess.loc[tb.index].reset_index()
-        
-        feature_cols = ["side_score", "vol_60"]  
-        df_out = df_out.set_index(tb.index)   # tb.index == t0
-        
-        feature_cols = ["side_score", "vol_60"] 
-        p_meta, rep = fit_secondary_logistic(df_out, feature_cols, splits=None)
-        
-        df_out["p_meta"] = np.nan
-        df_out.loc[p_meta.index, "p_meta"] = p_meta.astype(float)
-        
-        print("Secondary (in-sample) report:", rep)
-        
-        # avoid double t0
-        if "t0" in df_out.columns:
-            df_out = df_out.drop(columns=["t0"])
-        
-        df_out = df_out.reset_index()  # aggiunge 't0'
-        df_out = df_out.rename(columns={"t0": tb_params.time_col})
-
-
-        print("Secondary (in-sample) report:", rep)
-        print("Secondary coverage vs all events:", df_out["p_meta"].notna().mean() * 100)
 
         
         out_path = os.path.join(
@@ -1544,13 +1305,8 @@ def main():
         time_col="timestamp",
         min_abs_logret=0.0
     )
-    """
-    validate_labeled_parquet(
-        path="C:/Users/enric/Desktop/tesi/data/dukascopy/labeled/EUR_USD_LABELED.parquet",
-        horizon_bars=60,
-        pair_name="EURUSD"
-    )
-    """
+
+    
     import cProfile
     import pstats
     
@@ -1573,29 +1329,66 @@ def main():
                 horizon=60
             )
 
-
-    
+  
     stats = pstats.Stats(pr)
     stats.sort_stats("cumtime").print_stats(20)
-    
-    
-    
-    #Compute Spread
-    
-    """
-    stats = compute_spread_stats_for_folder(
-        joined,
-        time_col = "timestamp",
-        max_spread_bps = 200.0,
-        verbose = False
-    )
-    print(stats)
-    # Optionally save:
-    out_path = os.path.join(joined, "spread_stats_per_pair.parquet")
-    stats.to_parquet(out_path)
-    print(f"Saved spread stats to {out_path}")
-    """
+
 
         
 if __name__ == "__main__":
     main() 
+    
+    
+"""
+    # Meta-label diagnostics
+    _print_hdr(f" META-LABEL DIAGNOSTICS{tag}")
+
+    # meta_y balance
+    if meta_y_col in x.columns:
+        my = x[meta_y_col].reindex(tb_local.index)
+        myv = my.dropna().astype(float)
+        if myv.empty:
+            print(" meta_y is all NaN at events.")
+        else:
+            p1 = float((myv == 1).mean() * 100)
+            p0 = float((myv == 0).mean() * 100)
+            print(f"meta_y class balance (non-NaN): 1={p1:.1f}%, 0={p0:.1f}%")
+    else:
+        # allow meta_y passed only as tb column
+        if meta_y_col in tb_local.columns:
+            myv = tb_local[meta_y_col].dropna().astype(float)
+            p1 = float((myv == 1).mean() * 100) if not myv.empty else np.nan
+            p0 = float((myv == 0).mean() * 100) if not myv.empty else np.nan
+            print(f"meta_y class balance (from tb): 1={p1:.1f}%, 0={p0:.1f}%")
+        else:
+            print(f"meta_y not found in df_sess or tb as '{meta_y_col}'.")
+
+    # Relationship meta_y vs |side_score|
+    _print_hdr(f"meta_y vs |side_score|{tag}")
+    if (side_score_col in x.columns):
+        ss = x[side_score_col].reindex(tb_local.index).astype(float)
+        # meta_y from df_sess if present, else tb
+        if meta_y_col in x.columns:
+            my = x[meta_y_col].reindex(tb_local.index)
+        elif meta_y_col in tb_local.columns:
+            my = tb_local[meta_y_col]
+        else:
+            my = None
+
+        if my is None:
+            print(" Cannot compute meta_y vs |side_score|: meta_y missing.")
+        else:
+            tmp = pd.concat([my.rename("meta_y"), ss.abs().rename("|side_score|")], axis=1).dropna()
+            if len(tmp) < 30:
+                print("Not enough labeled data for meta_y vs |side_score| check.")
+            else:
+                # Bin by |side_score|
+                tmp["bin"] = pd.qcut(tmp["|side_score|"], q=5, duplicates="drop")
+                grp = tmp.groupby("bin")["meta_y"].mean() * 100
+                print("P(meta_y=1) by |side_score| quintile (in %):")
+                print(grp.round(1).to_string())
+    else:
+        print(f"df_sess missing '{side_score_col}' column.")
+        
+
+"""
