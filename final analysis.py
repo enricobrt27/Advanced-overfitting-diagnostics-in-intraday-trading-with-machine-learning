@@ -44,7 +44,7 @@ import math
 import json
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
-
+from pathlib import Path
 import numpy as np
 import pandas as pd
 
@@ -738,88 +738,103 @@ def summarize_models_robustness(
 # =========================
 
 def run_analysis(
-    tested_dir: str,
-    analyzed_dir: str,
     do_cscv: bool = True,
     cscv_S: int = 8,
     cscv_max_iter: Optional[int] = None,
 ) -> None:
-    os.makedirs(analyzed_dir, exist_ok=True)
-
-    backtests = discover_backtests(tested_dir)
-    if not backtests:
-        print(f"No backtests found in {tested_dir}")
-        return
-
-    all_rows = []
-
-    for bt in backtests:
-        pair = parse_pair_from_base(bt.base)
-
-        # ---- WF ----
-        if bt.wf_M is not None and bt.wf_split is not None:
-            print(f"\n[{bt.base}] Analyzing WF...")
-            wf_metrics, wf_summary = evaluate_one_scheme(
-                base=bt.base,
-                scheme="WF",
-                M_path=bt.wf_M,
-                split_path=bt.wf_split,
-                counts_path=None,
-                analyzed_dir=analyzed_dir,
-                do_cscv=do_cscv,
-                cscv_S=cscv_S,
-                cscv_max_iter=cscv_max_iter,
-            )
-            wf_metrics["pair"] = pair
-            wf_metrics["scheme"] = "WF"
-            all_rows.append(wf_metrics)
-
-        # ---- CPCV ----
-        if bt.cpcv_M is not None and bt.cpcv_split is not None:
-            print(f"\n[{bt.base}] Analyzing CPCV...")
-            cpcv_metrics, cpcv_summary = evaluate_one_scheme(
-                base=bt.base,
-                scheme="CPCV",
-                M_path=bt.cpcv_M,
-                split_path=bt.cpcv_split,
-                counts_path=bt.cpcv_counts,
-                analyzed_dir=analyzed_dir,
-                do_cscv=do_cscv,
-                cscv_S=cscv_S,
-                cscv_max_iter=cscv_max_iter,
-            )
-            cpcv_metrics["pair"] = pair
-            cpcv_metrics["scheme"] = "CPCV"
-            all_rows.append(cpcv_metrics)
-
-    if not all_rows:
-        print("Nothing analyzed (missing files).")
-        return
-
-    all_metrics = pd.concat(all_rows, axis=0, ignore_index=True)
-
-    # save merged metrics for convenience
-    merged_path = os.path.join(analyzed_dir, "all_metrics.parquet")
-    all_metrics.to_parquet(merged_path, index=False)
-    print(f"\nSaved merged metrics to {merged_path}")
-
-    # Global summaries
-    summarize_best_strategies(all_metrics, analyzed_dir)
-    summarize_models_global(all_metrics, analyzed_dir)
-    summarize_models_best_cases(all_metrics, analyzed_dir)
-    summarize_models_robustness(all_metrics, analyzed_dir)
-
-    print("\nDone.")
+    
+    
+    BASE_DIR = Path("C:/Users/enric/Desktop/tesi/gaps.py").resolve().parent
+    DATA_DIR = BASE_DIR / "data"
+    
+    #This dictionary contains input and output folders, 
+    #time is used to recognise the time column while suffix is the suffix used to recognise the datasets.
+    
+    folders = [
+        {
+            "analyzed": DATA_DIR / "dukascopy" / "analyzed",
+            "tested": DATA_DIR / "dukascopy" / "tested",
+        },
+        {
+            "analyzed": DATA_DIR / "dukascopy" / "analyzed_costs",
+            "tested": DATA_DIR / "dukascopy" / "tested_costs",
+        }
+    ]
+    
+    for folder in folders:
+        analyzed_dir = folder["analyzed"]
+        tested_dir = folder["tested"]
+        os.makedirs(analyzed_dir, exist_ok=True)
+    
+        backtests = discover_backtests(tested_dir)
+        if not backtests:
+            print(f"No backtests found in {tested_dir}")
+            return
+    
+        all_rows = []
+    
+        for bt in backtests:
+            pair = parse_pair_from_base(bt.base)
+    
+            # ---- WF ----
+            if bt.wf_M is not None and bt.wf_split is not None:
+                print(f"\n[{bt.base}] Analyzing WF...")
+                wf_metrics, wf_summary = evaluate_one_scheme(
+                    base=bt.base,
+                    scheme="WF",
+                    M_path=bt.wf_M,
+                    split_path=bt.wf_split,
+                    counts_path=None,
+                    analyzed_dir=analyzed_dir,
+                    do_cscv=do_cscv,
+                    cscv_S=cscv_S,
+                    cscv_max_iter=cscv_max_iter,
+                )
+                wf_metrics["pair"] = pair
+                wf_metrics["scheme"] = "WF"
+                all_rows.append(wf_metrics)
+    
+            # ---- CPCV ----
+            if bt.cpcv_M is not None and bt.cpcv_split is not None:
+                print(f"\n[{bt.base}] Analyzing CPCV...")
+                cpcv_metrics, cpcv_summary = evaluate_one_scheme(
+                    base=bt.base,
+                    scheme="CPCV",
+                    M_path=bt.cpcv_M,
+                    split_path=bt.cpcv_split,
+                    counts_path=bt.cpcv_counts,
+                    analyzed_dir=analyzed_dir,
+                    do_cscv=do_cscv,
+                    cscv_S=cscv_S,
+                    cscv_max_iter=cscv_max_iter,
+                )
+                cpcv_metrics["pair"] = pair
+                cpcv_metrics["scheme"] = "CPCV"
+                all_rows.append(cpcv_metrics)
+    
+        if not all_rows:
+            print("Nothing analyzed (missing files).")
+            return
+    
+        all_metrics = pd.concat(all_rows, axis=0, ignore_index=True)
+    
+        # save merged metrics for convenience
+        merged_path = os.path.join(analyzed_dir, "all_metrics.xlsx")
+        all_metrics.to_excel(merged_path, sheet_name="metrics", index=False)
+        print(f"\nSaved merged metrics to {merged_path}")
+    
+        # Global summaries
+        summarize_best_strategies(all_metrics, analyzed_dir)
+        summarize_models_global(all_metrics, analyzed_dir)
+        summarize_models_best_cases(all_metrics, analyzed_dir)
+        summarize_models_robustness(all_metrics, analyzed_dir)
+    
+        print("\nDone.")
 
 
 if __name__ == "__main__":
-    # CHANGE THESE PATHS
-    TESTED_DIR = r"C:\Users\enric\Desktop\tesi\data\dukascopy\tested"
-    ANALYZED_DIR = r"C:\Users\enric\Desktop\tesi\data\dukascopy\analyzed"
 
     run_analysis(
-        tested_dir=TESTED_DIR,
-        analyzed_dir=ANALYZED_DIR,
         do_cscv=True,
         cscv_S=8,
         cscv_max_iter=None,
