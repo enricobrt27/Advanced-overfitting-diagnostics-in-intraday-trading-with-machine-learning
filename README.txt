@@ -34,7 +34,7 @@ USD/JPY
 
 
 
-10. Key Findings
+1) Key Findings
 -Strong Ranking Signal
 -Decile 10 consistently outperforms decile 1
 -Spearman ~ 0.98–1.00 across folds
@@ -46,7 +46,7 @@ USD/JPY
 
 Observed performance may be Micro-edge or sampling noise within realistic bounds
 
-11. Current Status
+2) Current Status
 
 Regression model shows strongest structure.
 
@@ -68,7 +68,7 @@ Further regularization experiments
 
 Multi-asset extension
 
-12. Next Possible Improvements (Without Overfitting)
+3) Next Possible Improvements (Without Overfitting)
 
 Feature orthogonalization
 
@@ -82,7 +82,7 @@ Cross-asset pooled training
 
 Turnover-aware threshold optimization
 
-13. Philosophy of the Project
+4) Philosophy of the Project
 
 This project prioritizes:
 
@@ -98,7 +98,7 @@ Transparency over performance inflation
 
 It is designed as a research framework rather than a production trading system.
 
-14. Conclusion
+5) Conclusion
 
 The system demonstrates:
 
