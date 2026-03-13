@@ -27,7 +27,6 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
 import pandas as pd
-from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
@@ -48,7 +47,7 @@ end_s   = pd.Timestamp(datetime(2025, 9, 29), tz="UTC")
 # === COST CONFIGURATION =====================================================
 
 # First scenario: no costs 
-USE_COSTS = False            # True =  fee + slippage, False = 0 costs
+#USE_COSTS = True            # True =  fee + slippage, False = 0 costs
 
 # Fixed fee (round-trip) expressed in basis points on the notional
 # Esempio: 0.25 bps ~ 0.000025 = 0.0025%
@@ -310,15 +309,13 @@ def generate_cpcv_splits(
 def build_event_returns_classification(
     df: pd.DataFrame,
     test_idx: np.ndarray,
-    y_true: np.ndarray,
-    y_pred: np.ndarray,
-    y_proba: Optional[np.ndarray],
+    signal: np.ndarray,
+    long_mask: str,
+    short_mask: str,
     payoff_col: str,
     side_col: str,
     fee_perc: float = 0.0,
-    spread_perc: float = 0.0,
     slippage_perc: float = 0.0,
-    prob_threshold: float = 0.5,
     position_size: float = 1,
     time_col: str = "timestamp",
     use_dynamic_slippage: bool = True,
@@ -330,44 +327,23 @@ def build_event_returns_classification(
     if payoff_col not in df.columns or side_col not in df.columns:
         return out
 
-    # --- prob must be 1D length n ---
-    if y_proba is None:
-        prob = (np.asarray(y_pred).reshape(-1) == 1).astype(float)
-    else:
-        yp = np.asarray(y_proba)
-        # if predict_proba returns (n,2), take class-1 proba
-        if yp.ndim == 2 and yp.shape[1] >= 2:
-            prob = yp[:, 1]
-        else:
-            prob = yp.reshape(-1)
+    payoff = df.loc[df.index[test_idx], payoff_col].to_numpy(dtype=float)
 
-    prob = np.asarray(prob).reshape(-1)
-    if prob.shape[0] != n:
-        raise ValueError(f"Prob length mismatch: prob={prob.shape[0]} vs test={n}")
-
-    payoff = df.loc[df.index[test_idx], payoff_col].to_numpy(dtype=float, copy=False).reshape(-1)
-    side_vals = df.loc[df.index[test_idx], side_col].to_numpy(dtype=float, copy=False).reshape(-1)
-
-    if payoff.shape[0] != n or side_vals.shape[0] != n:
+    if payoff.shape[0] != n:
         raise ValueError("payoff/side length mismatch in build_event_returns_classification")
 
-    take = prob >= prob_threshold
-    gross = side_vals * payoff
+    gross = payoff
     if gross_is_log:
-        gross = float(np.expm1(gross))  # exp(log) - 1
-    else:
-        gross = float(gross)
-    gross = np.where(take, gross, 0.0)
-    
-    if not use_dynamic_slippage:
-        total_cost = fee_perc + slippage_perc
-        out = gross - np.where(take, total_cost, 0.0)
-        return out.astype(float, copy=False)
+        gross = np.expm1(gross)  # exp(log) - 1
+ 
+            
+    take = signal != 0
+    gross_trade = signal * gross
     
     times = pd.to_datetime(df.loc[df.index[test_idx], time_col], utc=True)
     dyn_slip = np.array([get_slippage_perc_for_timestamp(ts) for ts in times], dtype=float)
-    total_cost = fee_perc + dyn_slip
-    out = (gross - np.where(take, total_cost, 0.0)) * float(position_size)
+    total_cost = fee_perc + (dyn_slip if use_dynamic_slippage else slippage_perc)
+    out = (gross_trade - np.where(take, 2*total_cost, 0.0)) * position_size 
     return out.astype(float, copy=False)
 
 
@@ -376,12 +352,11 @@ def build_event_returns_regression(
     test_idx: np.ndarray,
     y_true: np.ndarray,
     y_pred: np.ndarray,
+    selected: float,
     payoff_col: str,
     side_col: str,
     fee_perc: float = 0.0,
-    spread_perc: float = 0.0,
     slippage_perc: float = 0.0,
-    decision_threshold: float = 0.0,
     position_size: float = 1,
     time_col: str = "timestamp",
     use_dynamic_slippage: bool = True,
@@ -398,29 +373,21 @@ def build_event_returns_regression(
         raise ValueError(f"Pred length mismatch: pred={pred.shape[0]} vs test={n}")
 
     payoff = df.loc[df.index[test_idx], payoff_col].to_numpy(dtype=float, copy=False).reshape(-1)
-    side_vals = df.loc[df.index[test_idx], side_col].to_numpy(dtype=float, copy=False).reshape(-1)
 
-    if payoff.shape[0] != n or side_vals.shape[0] != n:
-        raise ValueError("payoff/side length mismatch in build_event_returns_classification")
-
-
-    take = pred > decision_threshold
-    gross = side_vals * payoff
+    if payoff.shape[0] != n:
+        raise ValueError("payoff/side length mismatch in build_event_returns_regression")
+    
+    take1 = pred >= selected 
+    take = take1 #& take2
+    gross = payoff
     if gross_is_log:
-        gross = float(np.expm1(gross))  # exp(log) - 1
-    else:
-        gross = float(gross)
+        gross = np.expm1(gross)  # exp(log) - 1
     gross = np.where(take, gross, 0.0)
-
-    if not use_dynamic_slippage:
-        total_cost = fee_perc + slippage_perc
-        out = gross - np.where(take, total_cost, 0.0)
-        return out.astype(float, copy=False)
 
     times = pd.to_datetime(df.loc[df.index[test_idx], time_col], utc=True)
     dyn_slip = np.array([get_slippage_perc_for_timestamp(ts) for ts in times], dtype=float)
-    total_cost = fee_perc + dyn_slip
-    out = (gross - np.where(take, total_cost, 0.0)) * float(position_size)
+    total_cost = fee_perc + (dyn_slip if use_dynamic_slippage else slippage_perc)
+    out = (gross - np.where(take, 2*total_cost, 0.0)) * position_size    
     return out.astype(float, copy=False)
 
 
@@ -453,8 +420,9 @@ def get_classification_models() -> Dict[str, Pipeline]:
         colsample_bytree=0.8,
         tree_method="hist",
         device="cuda",
-        objective="binary:logistic",
-        eval_metric="logloss",
+        objective="multi:softprob",
+        num_class=3,
+        eval_metric="mlogloss",
         n_jobs=0,           
         random_state=42,
         )),
@@ -763,13 +731,13 @@ def diagnose_backtest_pipeline(
         # sanity: train/test index overlap
         set_overlap = len(np.intersect1d(tr, te_idx)) > 0
 
-        # “range” (solo informativo)
+        # “range” 
         tr_start = t0.iloc[tr].min()
         tr_end_max = te.iloc[tr].max()
         te_start = t0.iloc[te_idx].min()
         te_end_max = te.iloc[te_idx].max()
 
-        # overlap vero: train intervals vs test blocks (segmenti contigui in indice/tempo)
+        # True overlap: train intervals vs test blocks 
         runs = _runs_from_idx(te_idx)
 
         tr_t0 = t0.iloc[tr].to_numpy()
@@ -875,7 +843,6 @@ def run_models(
     use_cpcv: bool,
     cpcv_params: CPCVParams,
     fee_perc: float,
-    spread_perc: float,
     slippage_perc: float,
     use_dynamic_slippage: bool,
     diag: bool = False,
@@ -885,7 +852,6 @@ def run_models(
     Requires:
       - time_col (t0)
       - t_end
-      - meta_y
       - side
       - open_bid/open_ask on event rows
     Uses df_time_indexed for close_bid/close_ask reindexed at t_end.
@@ -893,13 +859,13 @@ def run_models(
 
     basename = Path(basename).stem.replace("_LABELED", "")
 
-    meta_col   = "meta_y"
+    label_col = "label"
     t_end_col  = "t_end"
     side_col   = "side"
     weight_col = "weight"
     payoff_col = "fwd_log_ret"   # computed here if missing
 
-    required = [time_col, meta_col, t_end_col, side_col]
+    required = [label_col, time_col, t_end_col, side_col]
     missing = [c for c in required if c not in df.columns]
     if missing:
         raise ValueError(f"{basename}: missing required columns {missing}")
@@ -921,7 +887,7 @@ def run_models(
 
     # Filter valid events
     mask_evt = (
-        df[meta_col].notna()
+        df[label_col].notna()
         & df[payoff_col].notna()
         & df[side_col].notna()
         & (df[side_col] != 0)
@@ -933,10 +899,10 @@ def run_models(
         return None
 
     # Build X, y (avoid leakage)
-    leak_cols = [meta_col, payoff_col, t_end_col, time_col]
+    leak_cols = [payoff_col, t_end_col, time_col]
     X = df_h.drop(columns=[c for c in leak_cols if c in df_h.columns], errors="ignore")
 
-    y_cls = df_h[meta_col].astype(int)
+    y_cls = df_h[label_col].astype(int)
     y_reg = df_h[payoff_col].astype(float)
 
     if weight_col in df_h.columns:
@@ -951,7 +917,7 @@ def run_models(
     dt_cols = X.select_dtypes(include=["datetime64[ns]", "datetime64[ns, UTC]"]).columns.tolist()
     if len(dt_cols) > 0:
         # print for debug once
-        print(f"[{basename}] Dropping datetime columns from X: {dt_cols}")
+        #print(f"[{basename}] Dropping datetime columns from X: {dt_cols}")
         X = X.drop(columns=dt_cols)
     # if any object columns remain, try coercing to numeric or drop
     obj_cols = X.select_dtypes(include=["object"]).columns.tolist()
@@ -962,12 +928,12 @@ def run_models(
         # after coercion, drop columns that are entirely NaN (meaning non-numeric)
         all_nan_obj = [c for c in obj_cols if X[c].isna().all()]
         if all_nan_obj:
-            print(f"[{basename}] Dropping non-numeric object columns from X: {all_nan_obj}")
+            #print(f"[{basename}] Dropping non-numeric object columns from X: {all_nan_obj}")
             X = X.drop(columns=all_nan_obj)
     # drop obvious TBM / leakage patterns if present
     pattern_drop = [c for c in X.columns if c.startswith("t1_") or c.startswith("t_end") or c.startswith("label") or c.startswith("meta_")]
     if pattern_drop:
-        print(f"[{basename}] Dropping leakage-pattern columns from X: {pattern_drop[:20]}{'...' if len(pattern_drop)>20 else ''}")
+        #print(f"[{basename}] Dropping leakage-pattern columns from X: {pattern_drop[:20]}{'...' if len(pattern_drop)>20 else ''}")
         X = X.drop(columns=pattern_drop)
 
     print(f"[{basename}] X dtypes summary:")
@@ -1007,54 +973,92 @@ def run_models(
         )
 
 
-    # Run CV
+        
     def _run_scheme(scheme_name: str, splits):
+    
+        Q_LIST = [70, 80, 90, 95]
 
-        returns_store = {m: np.zeros(n_samples) for m in list(cls_models) + list(reg_models)}
-        taken_store = {m: np.zeros(n_samples, dtype=bool) for m in cls_models}
+        cls_strats = list(cls_models.keys())
+        reg_strats = [f"{name}__q{q}" for name in reg_models.keys() for q in Q_LIST]
+        
+        all_strategy_names = cls_strats + reg_strats
+    
+        if scheme_name == "CPCV":
+            sum_store = {m: np.zeros(n_samples, dtype=float) for m in all_strategy_names}
+            cnt_store = {m: np.zeros(n_samples, dtype=np.int16) for m in all_strategy_names}
+        else:
+            returns_store = {m: np.zeros(n_samples, dtype=float) for m in all_strategy_names}
+    
+        taken_store = {m: np.zeros(n_samples, dtype=bool) for m in all_strategy_names}
         rows = []
-
+        rows_splits = []   
+                    
         for fold, (train_idx, test_idx) in enumerate(splits, 1):
             X_tr, X_te = X.iloc[train_idx], X.iloc[test_idx]
             y_tr_cls, y_te_cls = y_cls.iloc[train_idx], y_cls.iloc[test_idx]
             sw_tr = sample_weight[train_idx]
+            rows_splits.append({
+                "fold": fold,
+                "train_idx": train_idx.tolist(),
+                "test_idx": test_idx.tolist(),
+                "train_start": int(train_idx.min()),
+                "train_end": int(train_idx.max()),
+                "test_start": int(test_idx.min()),
+                "test_end": int(test_idx.max()),
+                "n_train": len(train_idx),
+                "n_test": len(test_idx),
+                "test_start_ts": df_h.loc[test_idx, time_col].min(),
+                "test_end_ts": df_h.loc[test_idx, time_col].max(),
+            })
 
             # --- CLS ---
             for name, pipe in cls_models.items():
-                pipe.fit(X_tr, y_tr_cls, clf__sample_weight=sw_tr)
-
-                y_pred = pipe.predict(X_te)
-                try:
-                    y_proba = pipe.predict_proba(X_te)[:, 1]
-                except Exception:
-                    y_proba = None
+                y_tr_mapped = y_tr_cls + 1
+                #y_te_mapped = y_te_cls + 1
+                pipe.fit(X_tr, y_tr_mapped, clf__sample_weight=sw_tr)
+                proba_te = pipe.predict_proba(X_te)
+                proba_tr = pipe.predict_proba(X_tr)
+                
+                p_short_te = proba_te[:, 0]
+                p_short_tr = proba_tr[:, 0]
+                
+                thr_short = np.percentile(p_short_tr, 90)   # scegli q (90,95,...)
+                
+                short_mask = p_short_te >= thr_short
+                long_mask  = np.zeros_like(short_mask, dtype=bool)
+                
+                signal = np.zeros(len(test_idx))
+                signal[short_mask] = -1
+                #cost_multipliers = [1, 2, 3]
+                
+                #for mult in cost_multipliers:
 
                 fold_ret = build_event_returns_classification(
                     df=df_h,
                     test_idx=test_idx,
-                    y_true=y_te_cls.values,
-                    y_pred=y_pred,
-                    y_proba=y_proba,
+                    long_mask=long_mask,
+                    short_mask=short_mask,
+                    signal=signal,
                     payoff_col=payoff_col,
                     side_col=side_col,
                     fee_perc=fee_perc,
-                    spread_perc=spread_perc,
                     slippage_perc=slippage_perc,
-                    prob_threshold=0.5,
                     time_col=time_col,
                     use_dynamic_slippage=use_dynamic_slippage,
                 )
+                #print(f"Cost x{mult} -> mean net:", fold_ret.mean())
                 fold_ret = np.asarray(fold_ret).reshape(-1)
                 if fold_ret.shape[0] != len(test_idx):
                     raise ValueError(f"{scheme_name} {name}: fold_ret shape {fold_ret.shape} != len(test_idx) {len(test_idx)}")
-                returns_store[name][test_idx] = fold_ret
+                
+                if scheme_name == "CPCV":
+                    sum_store[name][test_idx] += fold_ret
+                    cnt_store[name][test_idx] += 1
+                else:
+                    returns_store[name][test_idx] = fold_ret
 
                 taken_store[name][test_idx] = (fold_ret != 0)
-
-                try:
-                    auc = roc_auc_score(y_te_cls, y_proba) if y_proba is not None else np.nan
-                except ValueError:
-                    auc = np.nan
+  
 
                 rows.append({
                     "basename": basename,
@@ -1064,79 +1068,119 @@ def run_models(
                     "fold": fold,
                     "n_train": len(train_idx),
                     "n_test": len(test_idx),
-                    "auc": auc,
                 })
 
             # --- REG ---
             y_tr_reg = y_reg.iloc[train_idx].to_numpy()
             y_te_reg = y_reg.iloc[test_idx].to_numpy()
+            
 
             for name, pipe in reg_models.items():
                 pipe.fit(X_tr, y_tr_reg, reg__sample_weight=sw_tr)
-                y_hat = pipe.predict(X_te)
+                
+                for q in Q_LIST:
+                    y_hat_tr = pipe.predict(X_tr)
+                    thr = np.percentile(y_hat_tr, q)
+                    y_hat = pipe.predict(X_te)
+                    selected = y_hat >= thr
+                    
+                    # payoff OOS
+                    #payoff_te = df_h.loc[df.index[test_idx], payoff_col].to_numpy()
+                    
+                    fold_ret = build_event_returns_regression(
+                        df=df_h,
+                        test_idx=test_idx,
+                        y_true=y_te_reg,
+                        y_pred=y_hat,
+                        selected=selected,
+                        payoff_col=payoff_col,
+                        side_col=side_col,
+                        fee_perc=fee_perc,#*mult
+                        slippage_perc=slippage_perc,#*mult,
+                        time_col=time_col,
+                        use_dynamic_slippage=use_dynamic_slippage,
+                    )
+                    fold_ret = np.asarray(fold_ret).reshape(-1)
+                    if fold_ret.shape[0] != len(test_idx):
+                        raise ValueError(f"{scheme_name} {name}: fold_ret shape {fold_ret.shape} != len(test_idx) {len(test_idx)}")
+    
+                    strategy_name = f"{name}__q{q}"
+                    
+                    if scheme_name == "CPCV":
+                        sum_store[strategy_name][test_idx] += fold_ret
+                        cnt_store[strategy_name][test_idx] += 1
+                    else:
+                        if strategy_name not in returns_store:
+                            returns_store[strategy_name] = np.zeros(n_samples, dtype=float)
+                            taken_store[strategy_name] = np.zeros(n_samples, dtype=bool)
+                        returns_store[strategy_name][test_idx] = fold_ret
+                    
+                    taken_store[strategy_name][test_idx] = (fold_ret != 0)
+                    
+                    rows.append({
+                        "basename": basename,
+                        "cv": scheme_name,
+                        "model": name,
+                        "task": "reg",
+                        "fold": fold,
+                        "n_train": len(train_idx),
+                        "n_test": len(test_idx),
+                    })
+                    
 
-                fold_ret = build_event_returns_regression(
-                    df=df_h,
-                    test_idx=test_idx,
-                    y_true=y_te_reg,
-                    y_pred=y_hat,
-                    payoff_col=payoff_col,
-                    side_col=side_col,
-                    fee_perc=fee_perc,
-                    spread_perc=spread_perc,
-                    slippage_perc=slippage_perc,
-                    decision_threshold=0.2,
-                    time_col=time_col,
-                    use_dynamic_slippage=use_dynamic_slippage,
-                )
-                fold_ret = np.asarray(fold_ret).reshape(-1)
-                if fold_ret.shape[0] != len(test_idx):
-                    raise ValueError(f"{scheme_name} {name}: fold_ret shape {fold_ret.shape} != len(test_idx) {len(test_idx)}")
-
-                returns_store[name][test_idx] = fold_ret
-
-        M = pd.DataFrame(returns_store, index=df_h[time_col])
+        splits_df = pd.DataFrame(rows_splits)
         results = pd.DataFrame(rows)
-        return M, results, taken_store, splits
+        if scheme_name == "CPCV":
+            avg_store = {}
+            for strat in sum_store:
+                avg = np.zeros(n_samples, dtype=float)
+                mask = cnt_store[strat] > 0
+                avg[mask] = sum_store[strat][mask] / cnt_store[strat][mask]
+                avg_store[strat] = avg
+        
+            M = pd.DataFrame(avg_store, index=df_h[time_col])
+            C = pd.DataFrame(cnt_store, index=df_h[time_col])  
+            return M, results, taken_store, splits_df, C
+        else:
+            M = pd.DataFrame(returns_store, index=df_h[time_col])
+            return M, results, taken_store, splits_df, None
 
+
+    splits_wf_df = pd.DataFrame()
     M_wf = pd.DataFrame()
     results_wf = pd.DataFrame()
+    splits_cpcv_df = pd.DataFrame()
     M_cpcv = pd.DataFrame()
     results_cpcv = pd.DataFrame()
+    C_cpcv = None
     
+   
     if use_walkforward:
-        M_wf, results_wf, taken_wf, splits_wf = _run_scheme("WF", splits_wf)
-        if diag:
-            take_mask = taken_wf.get(diag_model)
-            if take_mask is not None:
-                diagnose_backtest_pipeline(
-                    df_h=df_h,
-                    splits=splits_wf,
-                    payoff_col=payoff_col,
-                    side_col=side_col,
-                    time_col=time_col,
-                    t_end_col="t1_vert",  # o quello che usi come fine evento
-                    take_mask=pd.Series(take_mask, index=df_h.index),
-                    name=f"{basename} | WF | {diag_model}",
-                )
+        M_wf, results_wf, taken_wf, splits_wf_df, _ = _run_scheme("WF", splits_wf)
 
     if use_cpcv:
-        M_cpcv, results_cpcv, taken_cpcv, splits_cpcv = _run_scheme("CPCV", splits_cpcv)
-        if diag:
-            take_mask = taken_cpcv.get(diag_model)
-            if take_mask is not None:
-                diagnose_backtest_pipeline(
-                    df_h=df_h,
-                    splits=splits_cpcv,
-                    payoff_col=payoff_col,
-                    side_col=side_col,
-                    time_col=time_col,
-                    t_end_col="t1_vert",
-                    take_mask=pd.Series(take_mask, index=df_h.index),
-                    name=f"{basename} | CPCV | {diag_model}",
-                )
+        M_cpcv, results_cpcv, taken_cpcv, splits_cpcv_df, C_cpcv = _run_scheme("CPCV", splits_cpcv)
 
-    return M_wf, results_wf, M_cpcv, results_cpcv
+                
+    out_splits_wf = os.path.join(tested, f"{basename}_WF_split.parquet")
+    out_M_wf = os.path.join(tested, f"{basename}_WF_M.parquet")
+    out_results_wf = os.path.join(tested, f"{basename}_WF_results.parquet")
+    out_splits_cpcv = os.path.join(tested, f"{basename}_CPCV_split.parquet")
+    out_M_cpcv = os.path.join(tested, f"{basename}_CPCV_M.parquet")
+    out_results_cpcv = os.path.join(tested, f"{basename}_CPCV_results.parquet")
+
+    #Save cleaned DF
+    splits_wf_df.to_parquet(out_splits_wf, index=False)
+    M_wf.to_parquet(out_M_wf)
+    results_wf.to_parquet(out_results_wf, index=False)
+    splits_cpcv_df.to_parquet(out_splits_cpcv, index=False)
+    M_cpcv.to_parquet(out_M_cpcv)
+    results_cpcv.to_parquet(out_results_cpcv, index=False)
+    if C_cpcv is not None:
+        out_C_cpcv = os.path.join(tested, f"{basename}_CPCV_counts.parquet")
+        C_cpcv.to_parquet(out_C_cpcv, index=False)
+
+    return splits_wf, M_wf, results_wf, splits_cpcv, M_cpcv, results_cpcv, C_cpcv
 
  
 
@@ -1233,16 +1277,6 @@ def generate_max_sr_plot(sims, tried_strats, freq, T, mu_true, sigma, years):
     plt.legend()
     plt.tight_layout()
     plt.show()
-
-
-
-
-
-
-
-
-
-
     
 
 def calculate_minimum_backtest_length(tried_strats, expected_max_sr):
@@ -1307,12 +1341,13 @@ def main():
             "labeled": DATA_DIR / "dukascopy" / "labeled",
             "tested": DATA_DIR / "dukascopy" / "tested",
             "corr": DATA_DIR / "dukascopy" / "corr",
+            "costs":False
         },
-        
         {
-            "labeled": DATA_DIR / "ibkr" / "labeled",
-            "tested": DATA_DIR / "ibkr" / "tested",
-            "corr": DATA_DIR / "ibkr" / "corr",
+            "labeled": DATA_DIR / "dukascopy" / "labeled",
+            "tested": DATA_DIR / "dukascopy" / "tested_costs",
+            "corr": DATA_DIR / "dukascopy" / "corr",
+            "costs":True
         }
     ]
     
@@ -1338,8 +1373,8 @@ def main():
     
     cv = 2 #Number of Cross validation models used: CPCV and WF
     ml_models = 2 #Number of ML models for each CV model, Linear/Logistic reg and XGBoost
-    #strat = 7 #In previous analysis we used 7 different vertical barriers for tbm
-    tried_strats =  cv * ml_models   if [ cv, ml_models] !=0 else 0
+    strat = 4 #4 strats for regression, 1 for classification
+    tried_strats = cv * ml_models + strat*cv * ml_models   if [ cv, ml_models] !=0 else 0
     max_sharpe = run_batch(sims, tried_strats, freq, T, mu_true , sigma, plot_fig=False)
     
     #Average max sharpe ratio
@@ -1364,12 +1399,12 @@ def main():
     print(f"MinBTL for {tried_strats} tried strategies with expected maximum SR of {expected_max_sr}: {round(minbtl,4)} years")
 
 
-    """
     for folder in folders:
         
         labeled = folder["labeled"]
         tested = folder["tested"]
         corr = folder["corr"]
+        USE_COSTS = folder["costs"]
         os.makedirs(tested, exist_ok=True)
         
         labeled_files = glob.glob(os.path.join(labeled, "*.parquet"))
@@ -1405,36 +1440,26 @@ def main():
             basename=basename
         )   
             
-
-            
-            
-            
+            """
             corr_matrices = {}
 
             if not corr_matrix.empty:
                 corr_matrices[path] = corr_matrix
                 mean_corr_matrix(corr_matrices,
                                  corr = corr)
-            
-            #print(df["timestamp"].dtype)
-            #print(df["t1_H1"].dtype)   # o un altro orizzonte sicuramente presente
-            #print(df_time_indexed.index.dtype)
-            print(df)
-                 # --- costi da usare in questo run ---
+            """
             if USE_COSTS:
                 fee_perc = get_fee_perc()
-                # se vuoi comunque un minimo slippage statico oltre al dinamico
+               
                 slippage_perc = bps_to_return(SLIPPAGE_BPS_BASE)
             else:
                 fee_perc = 0.0
                 slippage_perc = 0.0
-         
-            spread_perc = 0.0  # lo spread è già nel payoff via bid/ask
-    
+             
     
             # Walk-Forward CV CV and CPCV
             print("Running Walk-Forward CV and CPCV...")
-            M_wf, results_wf, M_cpcv, results_cpcv = run_models(
+            splits_wf, M_wf, results_wf, splits_cpcv, M_cpcv, results_cpcv, C_cpcv = run_models(
                 df=df,
                 df_time_indexed=df_time_indexed,
                 tested=tested,
@@ -1446,39 +1471,14 @@ def main():
                 use_cpcv=True,
                 cpcv_params=params,
                 fee_perc=fee_perc,
-                spread_perc=spread_perc,
                 slippage_perc=slippage_perc,
                 diag=True,
                 diag_model="logit_cls",
                 use_dynamic_slippage=USE_COSTS and USE_DYNAMIC_SLIPPAGE,
             )
-"""
+            
 if __name__ == "__main__":
     main()
 
-'''
-
-    import cProfile
-    import pstats
-
-    with cProfile.Profile() as pr:
-        main()
-
-    stats = pstats.Stats(pr)
-    stats.sort_stats("cumtime").print_stats(20)
-    
-
-
-
-    purge_summary = pd.concat(summary_list, ignore_index=True)
-    pivot = purge_summary.pivot(index="pair", columns="horizon", values="p99_minutes")
-    print(pivot)
-
-'''
-
-
-'''        
-
-'''   
 
     
